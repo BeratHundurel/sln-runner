@@ -171,14 +171,29 @@ impl App {
     fn run_selected_project(&self) -> io::Result<()> {
         if let Some(selected) = self.list_state.selected() {
             let project = &self.projects[selected];
-
             println!("Running project: {}", project);
 
-            let project_path = std::path::Path::new(&self.selected_sln)
+            // Normalize the solution path and get its parent directory
+            let sln_dir = std::path::Path::new(&self.selected_sln)
                 .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join(project);
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Invalid solution path"))?;
 
+            // Construct and normalize the project path
+            let project_path = sln_dir.join(project);
+
+            // Get the project directory, handling both file and directory cases
+            let project_dir = if project_path.is_file() {
+                project_path.parent().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Cannot determine project directory",
+                    )
+                })?
+            } else {
+                &project_path
+            };
+
+            // Build the project
             let output = Command::new("dotnet")
                 .arg("build")
                 .arg("--configuration")
@@ -187,17 +202,20 @@ impl App {
                 .output()?;
 
             if !output.status.success() {
-                eprintln!("Build failed: {}", String::from_utf8_lossy(&output.stderr));
+                let error_msg = String::from_utf8_lossy(&output.stderr);
+                eprintln!("Build failed: {}", error_msg);
                 return Err(io::Error::new(io::ErrorKind::Other, "Build failed"));
             }
 
             println!("Build successful! Running ...");
 
-            let launch_settings_path = project_path.join("Properties").join("launchSettings.json");
-            let launch_profile =  Self::detect_launch_profile(&launch_settings_path);
+            // Check for launch settings
+            let launch_settings_path = project_dir.join("Properties").join("launchSettings.json");
+            let launch_profile = Self::detect_launch_profile(&launch_settings_path);
 
+            // Configure and run the project
             let mut command = Command::new("dotnet");
-            command.arg("run").current_dir(&project_path);
+            command.arg("run").current_dir(project_dir); // Use project_dir instead of project_path
 
             if let Some(profile) = launch_profile {
                 println!("Detected launch profile: {}", profile);
@@ -207,7 +225,6 @@ impl App {
             }
 
             command.spawn()?;
-
             return Ok(());
         }
 
@@ -226,5 +243,4 @@ impl App {
         }
         Ok(())
     }
-
 }
