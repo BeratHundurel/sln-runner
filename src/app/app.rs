@@ -17,9 +17,10 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     crossterm,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::Span,
-    widgets::{Block, Borders, List, ListItem, ListState},
+    text::{Span, Text},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 
@@ -32,6 +33,7 @@ pub struct App {
     pub projects: Vec<String>,
     list_state: ListState,
     showing_projects: bool,
+    logs: Vec<String>,
 }
 
 impl App {
@@ -53,6 +55,7 @@ impl App {
             projects,
             list_state: ListState::default().with_selected(Some(0)),
             showing_projects: false,
+            logs: Vec::new(),
         })
     }
 
@@ -64,11 +67,21 @@ impl App {
 
         while !self.exit {
             terminal.draw(|f| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(70), // Main content takes 70% of height
+                        Constraint::Percentage(30), // Logs take 30% of height
+                    ])
+                    .split(f.area());
+
                 if self.showing_projects {
                     self.draw_project_list(f);
                 } else {
                     self.draw_solution_list(f);
                 }
+
+                self.draw_logs(f, chunks[1]);
             })?;
 
             if event::poll(Duration::from_millis(100))? {
@@ -78,7 +91,14 @@ impl App {
                             KeyCode::Esc | KeyCode::Char('q') => self.exit = true,
                             KeyCode::Up => self.move_selection(-1),
                             KeyCode::Down => self.move_selection(1),
-                            KeyCode::Enter => self.on_enter_key()?,
+                            KeyCode::Enter => {
+                                self.on_enter_key()?;
+
+                                self.add_log(format!(
+                                    "Selected item at index: {}",
+                                    self.list_state.selected().unwrap_or(0)
+                                ));
+                            }
                             _ => {}
                         }
                     }
@@ -89,6 +109,13 @@ impl App {
         disable_raw_mode()?;
         terminal.backend_mut().execute(LeaveAlternateScreen)?;
         Ok(())
+    }
+
+    pub fn add_log(&mut self, message: String) {
+        self.logs.push(message);
+        if self.logs.len() > 100 {
+            self.logs.remove(0);
+        }
     }
 
     fn draw_solution_list(&mut self, f: &mut ratatui::Frame) {
@@ -110,6 +137,14 @@ impl App {
             .highlight_symbol("➤ ");
 
         f.render_stateful_widget(list, f.area(), &mut self.list_state);
+    }
+
+    fn draw_logs(&self, f: &mut ratatui::Frame, area: Rect) {
+        let log_text = Text::from(self.logs.join("\n"));
+        let paragraph = Paragraph::new(log_text)
+            .block(Block::default().borders(Borders::ALL).title(" Logs "))
+            .style(Style::default().fg(Color::White));
+        f.render_widget(paragraph, area);
     }
 
     fn draw_project_list(&mut self, f: &mut ratatui::Frame) {
@@ -171,17 +206,15 @@ impl App {
     fn run_selected_project(&self) -> io::Result<()> {
         if let Some(selected) = self.list_state.selected() {
             let project = &self.projects[selected];
+
             println!("Running project: {}", project);
 
-            // Normalize the solution path and get its parent directory
             let sln_dir = std::path::Path::new(&self.selected_sln)
                 .parent()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Invalid solution path"))?;
 
-            // Construct and normalize the project path
             let project_path = sln_dir.join(project);
 
-            // Get the project directory, handling both file and directory cases
             let project_dir = if project_path.is_file() {
                 project_path.parent().ok_or_else(|| {
                     io::Error::new(
@@ -193,7 +226,6 @@ impl App {
                 &project_path
             };
 
-            // Build the project
             let output = Command::new("dotnet")
                 .arg("build")
                 .arg("--configuration")
@@ -209,13 +241,11 @@ impl App {
 
             println!("Build successful! Running ...");
 
-            // Check for launch settings
             let launch_settings_path = project_dir.join("Properties").join("launchSettings.json");
             let launch_profile = Self::detect_launch_profile(&launch_settings_path);
 
-            // Configure and run the project
             let mut command = Command::new("dotnet");
-            command.arg("run").current_dir(project_dir); // Use project_dir instead of project_path
+            command.arg("run").current_dir(project_dir);
 
             if let Some(profile) = launch_profile {
                 println!("Detected launch profile: {}", profile);
